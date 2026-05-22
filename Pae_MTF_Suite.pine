@@ -1,0 +1,332 @@
+//@version=6
+// =============================================================================
+// Pae MTF Suite
+// EMA9 entry/exit signals (M1/M3/M5) + HTF/LTF Bias (M15/M30, EMA100 trend)
+// + Order Blocks (M15) + FVG (M5) + Volume Profile Fixed Range (M15)
+// + Signal tables (M1/M3/M5), Breakout table (M15), Volume Buy/Sell table (M5/M15)
+// =============================================================================
+indicator("Pae MTF Suite — EMA9 | Bias | OB | FVG | VP", shorttitle="Pae MTF", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=3000)
+
+// ============================== INPUTS =======================================
+grpSig  = "① EMA9 Signals (M1/M3/M5)"
+emaLen  = input.int(9,  "Signal EMA length",        group=grpSig, minval=1)
+tf1     = input.timeframe("1",  "Signal TF 1",      group=grpSig)
+tf2     = input.timeframe("3",  "Signal TF 2",      group=grpSig)
+tf3     = input.timeframe("5",  "Signal TF 3",      group=grpSig)
+showSig = input.bool(true, "Plot EMA9 + signals on chart", group=grpSig)
+
+grpBias = "② Bias / Trend (EMA100)"
+biasLen = input.int(100, "Trend / Bias EMA length", group=grpBias, minval=1)
+ltfTf   = input.timeframe("15", "LTF Bias TF",       group=grpBias)
+htfTf   = input.timeframe("30", "HTF Bias TF",       group=grpBias)
+showE100= input.bool(true, "Plot EMA100 trend line", group=grpBias)
+
+grpOB   = "③ Order Blocks (M15)"
+obTf    = input.timeframe("15", "OB timeframe",      group=grpOB)
+showOB  = input.bool(true, "Show Order Blocks",      group=grpOB)
+obKeep  = input.int(5, "Max OB kept (per side)",     group=grpOB, minval=1, maxval=20)
+obBullC = input.color(color.new(color.teal, 80),  "Bullish OB", group=grpOB)
+obBearC = input.color(color.new(color.maroon, 80),"Bearish OB", group=grpOB)
+
+grpFVG  = "④ Fair Value Gaps (M5)"
+fvgTf   = input.timeframe("5", "FVG timeframe",      group=grpFVG)
+showFVG = input.bool(true, "Show FVG",               group=grpFVG)
+fvgKeep = input.int(8, "Max FVG kept (per side)",    group=grpFVG, minval=1, maxval=30)
+fvgBullC= input.color(color.new(color.green, 82), "Bullish FVG", group=grpFVG)
+fvgBearC= input.color(color.new(color.red,   82), "Bearish FVG", group=grpFVG)
+
+grpVP   = "⑤ Volume Profile Fixed Range (M15)"
+vpTf    = input.timeframe("15", "VP timeframe",      group=grpVP)
+showVP  = input.bool(true, "Show Volume Profile",    group=grpVP)
+vpLook  = input.int(120, "VP lookback (TF bars)",    group=grpVP, minval=20, maxval=500)
+vpRows  = input.int(24,  "VP rows / bins",           group=grpVP, minval=10, maxval=60)
+vpVAp   = input.float(70,"Value Area %",             group=grpVP, minval=50, maxval=95)
+vpWidth = input.int(60,  "VP max width (bars)",      group=grpVP, minval=10, maxval=200)
+vpNormC = input.color(color.new(color.blue,  70), "Profile color", group=grpVP)
+vpVAC   = input.color(color.new(color.aqua,  60), "Value-area color", group=grpVP)
+vpPOCC  = input.color(color.new(color.orange, 0), "POC color",     group=grpVP)
+
+grpVol  = "⑥ Volume Buy/Sell (M5/M15)"
+volLen  = input.int(20, "Volume sum length (bars)",  group=grpVol, minval=1)
+
+grpBO   = "⑦ Breakout (M15)"
+boTf    = input.timeframe("15", "BO timeframe",      group=grpBO)
+boLen   = input.int(20, "Breakout lookback",         group=grpBO, minval=2)
+
+// ============================== HELPERS ======================================
+LA = barmerge.lookahead_off
+
+// ---- EMA9 cross signals on a given timeframe -------------------------------
+// returns [buyEntry, buyExit, lastClose] ; buyExit also = sell-entry, buyEntry also = sell-exit
+f_sig(string tf) =>
+    request.security(syminfo.tickerid, tf, [ta.crossover(close, ta.ema(close, emaLen)), ta.crossunder(close, ta.ema(close, emaLen)), close], lookahead=LA)
+
+// ---- Buy / sell volume split on a timeframe (rolling sum) ------------------
+f_vol(string tf) =>
+    request.security(syminfo.tickerid, tf, [math.sum(volume * (close - low) / math.max(high - low, syminfo.mintick), volLen), math.sum(volume * (high - close) / math.max(high - low, syminfo.mintick), volLen)], lookahead=LA)
+
+// ============================== ① SIGNALS ====================================
+[be1, bx1, c1] = f_sig(tf1)
+[be2, bx2, c2] = f_sig(tf2)
+[be3, bx3, c3] = f_sig(tf3)
+
+// remember last trigger price per TF (buyEntry==sellExit price ; buyExit==sellEntry price)
+var float p1buy  = na
+var float p1sell = na
+var float p2buy  = na
+var float p2sell = na
+var float p3buy  = na
+var float p3sell = na
+if be1
+    p1buy := c1
+if bx1
+    p1sell := c1
+if be2
+    p2buy := c2
+if bx2
+    p2sell := c2
+if be3
+    p3buy := c3
+if bx3
+    p3sell := c3
+
+// on-chart EMA9 + markers (chart timeframe)
+emaSig = ta.ema(close, emaLen)
+chBuy  = ta.crossover(close, emaSig)
+chSell = ta.crossunder(close, emaSig)
+plot(showSig ? emaSig : na, "EMA9", color=color.new(color.aqua, 0), linewidth=1)
+plotshape(showSig and chBuy,  "Buy Entry / Sell Exit",  style=shape.labelup,   location=location.belowbar, color=color.new(color.green, 0), text="BUY",  textcolor=color.white, size=size.tiny)
+plotshape(showSig and chSell, "Sell Entry / Buy Exit", style=shape.labeldown, location=location.abovebar, color=color.new(color.red,   0), text="SELL", textcolor=color.white, size=size.tiny)
+
+// ============================== ② BIAS / TREND ===============================
+ema100 = ta.ema(close, biasLen)
+plot(showE100 ? ema100 : na, "EMA100 Trend", color=color.new(color.orange, 0), linewidth=2)
+
+ltfBull = request.security(syminfo.tickerid, ltfTf, close > ta.ema(close, biasLen), lookahead=LA)
+htfBull = request.security(syminfo.tickerid, htfTf, close > ta.ema(close, biasLen), lookahead=LA)
+
+// ============================== ③ ORDER BLOCKS (M15) =========================
+// displacement OB: down-candle before bullish break (bull OB) / up-candle before bearish break (bear OB)
+[obBull, obBear, obH, obL, obT] = request.security(syminfo.tickerid, obTf, [close > high[1] and close[1] < open[1], close < low[1] and close[1] > open[1], high[1], low[1], time[1]], lookahead=LA)
+
+var box[] bullOB = array.new<box>()
+var box[] bearOB = array.new<box>()
+
+f_pushBox(box[] arr, box b, int keep) =>
+    array.push(arr, b)
+    if array.size(arr) > keep
+        box.delete(array.shift(arr))
+
+if showOB and obBull and not obBull[1] and not na(obH)
+    f_pushBox(bullOB, box.new(left=obT, top=obH, bottom=obL, right=time, xloc=xloc.bar_time, bgcolor=obBullC, border_color=color.new(color.teal, 40), text="OB", text_color=color.new(color.teal, 0), text_size=size.tiny, text_halign=text.align_left), obKeep)
+if showOB and obBear and not obBear[1] and not na(obH)
+    f_pushBox(bearOB, box.new(left=obT, top=obH, bottom=obL, right=time, xloc=xloc.bar_time, bgcolor=obBearC, border_color=color.new(color.maroon, 40), text="OB", text_color=color.new(color.maroon, 0), text_size=size.tiny, text_halign=text.align_left), obKeep)
+
+// keep boxes extending to the right edge
+if barstate.islast
+    for b in bullOB
+        box.set_right(b, time)
+    for b in bearOB
+        box.set_right(b, time)
+
+// ============================== ④ FVG (M5) ===================================
+// bullish FVG: low[0] > high[2] (gap up) ; bearish FVG: high[0] < low[2] (gap down)
+[fvgBull, fvgBear, fTop, fBot, fT] = request.security(syminfo.tickerid, fvgTf, [low > high[2], high < low[2], low > high[2] ? low : low[2], low > high[2] ? high[2] : high, time[2]], lookahead=LA)
+
+var box[] bullFVG = array.new<box>()
+var box[] bearFVG = array.new<box>()
+
+if showFVG and fvgBull and not fvgBull[1] and not na(fTop)
+    f_pushBox(bullFVG, box.new(left=fT, top=fTop, bottom=fBot, right=time, xloc=xloc.bar_time, bgcolor=fvgBullC, border_color=color.new(color.green, 50), text="FVG", text_color=color.new(color.green, 0), text_size=size.tiny, text_halign=text.align_right), fvgKeep)
+if showFVG and fvgBear and not fvgBear[1] and not na(fTop)
+    f_pushBox(bearFVG, box.new(left=fT, top=fTop, bottom=fBot, right=time, xloc=xloc.bar_time, bgcolor=fvgBearC, border_color=color.new(color.red, 50), text="FVG", text_color=color.new(color.red, 0), text_size=size.tiny, text_halign=text.align_right), fvgKeep)
+
+if barstate.islast
+    for b in bullFVG
+        box.set_right(b, time)
+    for b in bearFVG
+        box.set_right(b, time)
+
+// ============================== ⑤ VOLUME PROFILE (M15) =======================
+// accumulate closed-TF bar high/low/close/volume into rolling arrays
+[vH, vL, vC, vV] = request.security(syminfo.tickerid, vpTf, [high[1], low[1], close[1], volume[1]], lookahead=LA)
+vNew = ta.change(time(vpTf)) != 0
+
+var float[] aH = array.new_float()
+var float[] aL = array.new_float()
+var float[] aC = array.new_float()
+var float[] aV = array.new_float()
+
+if vNew and not na(vH) and not na(vV)
+    array.push(aH, vH)
+    array.push(aL, vL)
+    array.push(aC, vC)
+    array.push(aV, vV)
+    if array.size(aH) > vpLook
+        array.shift(aH)
+        array.shift(aL)
+        array.shift(aC)
+        array.shift(aV)
+
+var box[]  vpBoxes = array.new<box>()
+var line[] vpLines = array.new<line>()
+var label[] vpLabels = array.new<label>()
+
+if showVP and barstate.islast and array.size(aH) > 5
+    // clear previous drawings
+    for b in vpBoxes
+        box.delete(b)
+    array.clear(vpBoxes)
+    for ln in vpLines
+        line.delete(ln)
+    array.clear(vpLines)
+    for lb in vpLabels
+        label.delete(lb)
+    array.clear(vpLabels)
+
+    pHi = array.max(aH)
+    pLo = array.min(aL)
+    rng = pHi - pLo
+    if rng > 0
+        binSz = rng / vpRows
+        vol  = array.new_float(vpRows, 0.0)
+        n    = array.size(aH)
+        for i = 0 to n - 1
+            bH = array.get(aH, i)
+            bL = array.get(aL, i)
+            bV = array.get(aV, i)
+            span = bH - bL
+            if span <= 0
+                idx = math.min(vpRows - 1, math.max(0, int((bH - pLo) / binSz)))
+                array.set(vol, idx, array.get(vol, idx) + bV)
+            else
+                for r = 0 to vpRows - 1
+                    binLo = pLo + r * binSz
+                    binHi = binLo + binSz
+                    ov = math.min(bH, binHi) - math.max(bL, binLo)
+                    if ov > 0
+                        array.set(vol, r, array.get(vol, r) + bV * ov / span)
+        // POC + totals
+        total = array.sum(vol)
+        maxV  = array.max(vol)
+        pocIdx = array.indexof(vol, maxV)
+        // value area expansion from POC
+        target = total * vpVAp / 100.0
+        upI = pocIdx
+        dnI = pocIdx
+        acc = array.get(vol, pocIdx)
+        while acc < target and (upI < vpRows - 1 or dnI > 0)
+            upv = upI < vpRows - 1 ? array.get(vol, upI + 1) : -1.0
+            dnv = dnI > 0          ? array.get(vol, dnI - 1) : -1.0
+            if upv >= dnv
+                upI += 1
+                acc += upv
+            else
+                dnI -= 1
+                acc += dnv
+        // draw histogram to the right of the last bar (into the future)
+        leftX = bar_index + 2
+        for r = 0 to vpRows - 1
+            v = array.get(vol, r)
+            w = maxV > 0 ? int(math.round(v / maxV * vpWidth)) : 0
+            if w > 0
+                bcol = r == pocIdx ? vpPOCC : (r >= dnI and r <= upI ? vpVAC : vpNormC)
+                bb = box.new(left=leftX, top=pLo + (r + 1) * binSz, bottom=pLo + r * binSz, right=leftX + w, xloc=xloc.bar_index, bgcolor=bcol, border_color=color.new(color.gray, 80), border_width=1)
+                array.push(vpBoxes, bb)
+        // POC line across recent bars
+        pocPrice = pLo + (pocIdx + 0.5) * binSz
+        pl = line.new(x1=bar_index - math.min(200, bar_index), y1=pocPrice, x2=leftX + vpWidth, y2=pocPrice, xloc=xloc.bar_index, color=vpPOCC, width=1, style=line.style_dashed)
+        array.push(vpLines, pl)
+        array.push(vpLabels, label.new(x=leftX + vpWidth, y=pocPrice, text="POC " + str.tostring(pocPrice, format.mintick), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.orange, 20), textcolor=color.white, size=size.tiny))
+
+// ============================== ⑥ VOLUME BUY/SELL ============================
+[buy5,  sell5]  = f_vol(tf3)   // M5
+[buy15, sell15] = f_vol(ltfTf) // M15
+
+// ============================== ⑦ BREAKOUT (M15) =============================
+[boUp, boDn, boHH, boLL] = request.security(syminfo.tickerid, boTf, [close > ta.highest(high[1], boLen), close < ta.lowest(low[1], boLen), ta.highest(high[1], boLen), ta.lowest(low[1], boLen)], lookahead=LA)
+
+// ============================== TABLES =======================================
+// colors / helpers
+cHdr  = color.new(#1f2933, 0)
+cTxt  = color.white
+cBgD  = color.new(#0b0f14, 10)
+cGrn  = color.new(color.green, 0)
+cRed  = color.new(color.red, 0)
+cDim  = color.new(color.gray, 30)
+
+f_freshTxt(bool fresh, float px) =>
+    na(px) ? "—" : (fresh ? "● " : "") + str.tostring(px, format.mintick)
+
+f_freshBg(bool fresh, color base) =>
+    fresh ? base : cBgD
+
+f_tfLabel(string tf) =>
+    "M" + tf
+
+if barstate.islast
+    // ----- SIGNAL TABLE (M1/M3/M5) : top-right -----
+    var table tSig = table.new(position.top_right, 5, 4, border_width=1, frame_width=1, frame_color=color.gray)
+    table.cell(tSig, 0, 0, "TF",        bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 1, 0, "Buy In",    bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 2, 0, "Buy Out",   bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 3, 0, "Sell In",   bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 4, 0, "Sell Out",  bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    // row M1 :  Buy In/Sell Out share be1 ; Buy Out/Sell In share bx1
+    table.cell(tSig, 0, 1, f_tfLabel(tf1), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 1, 1, f_freshTxt(be1, p1buy),  bgcolor=f_freshBg(be1, cGrn), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 2, 1, f_freshTxt(bx1, p1sell), bgcolor=f_freshBg(bx1, cRed), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 3, 1, f_freshTxt(bx1, p1sell), bgcolor=f_freshBg(bx1, cRed), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 4, 1, f_freshTxt(be1, p1buy),  bgcolor=f_freshBg(be1, cGrn), text_color=cTxt, text_size=size.small)
+    // row M3
+    table.cell(tSig, 0, 2, f_tfLabel(tf2), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 1, 2, f_freshTxt(be2, p2buy),  bgcolor=f_freshBg(be2, cGrn), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 2, 2, f_freshTxt(bx2, p2sell), bgcolor=f_freshBg(bx2, cRed), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 3, 2, f_freshTxt(bx2, p2sell), bgcolor=f_freshBg(bx2, cRed), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 4, 2, f_freshTxt(be2, p2buy),  bgcolor=f_freshBg(be2, cGrn), text_color=cTxt, text_size=size.small)
+    // row M5
+    table.cell(tSig, 0, 3, f_tfLabel(tf3), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 1, 3, f_freshTxt(be3, p3buy),  bgcolor=f_freshBg(be3, cGrn), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 2, 3, f_freshTxt(bx3, p3sell), bgcolor=f_freshBg(bx3, cRed), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 3, 3, f_freshTxt(bx3, p3sell), bgcolor=f_freshBg(bx3, cRed), text_color=cTxt, text_size=size.small)
+    table.cell(tSig, 4, 3, f_freshTxt(be3, p3buy),  bgcolor=f_freshBg(be3, cGrn), text_color=cTxt, text_size=size.small)
+
+    // ----- BIAS + BREAKOUT TABLE : middle-right -----
+    var table tBias = table.new(position.middle_right, 2, 4, border_width=1, frame_width=1, frame_color=color.gray)
+    table.cell(tBias, 0, 0, "Bias / BO", bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tBias, 1, 0, "State",     bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tBias, 0, 1, "LTF " + f_tfLabel(ltfTf), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tBias, 1, 1, ltfBull ? "BULL ▲" : "BEAR ▼", bgcolor=ltfBull ? cGrn : cRed, text_color=cTxt, text_size=size.small)
+    table.cell(tBias, 0, 2, "HTF " + f_tfLabel(htfTf), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tBias, 1, 2, htfBull ? "BULL ▲" : "BEAR ▼", bgcolor=htfBull ? cGrn : cRed, text_color=cTxt, text_size=size.small)
+    boTxt = boUp ? "BO UP ▲" : boDn ? "BO DN ▼" : "RANGE"
+    boBg  = boUp ? cGrn : boDn ? cRed : cDim
+    table.cell(tBias, 0, 3, "BO " + f_tfLabel(boTf), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tBias, 1, 3, boTxt, bgcolor=boBg, text_color=cTxt, text_size=size.small)
+
+    // ----- VOLUME BUY/SELL TABLE (M5/M15) : bottom-right -----
+    var table tVol = table.new(position.bottom_right, 4, 3, border_width=1, frame_width=1, frame_color=color.gray)
+    table.cell(tVol, 0, 0, "Vol",   bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tVol, 1, 0, "Buy",   bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tVol, 2, 0, "Sell",  bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tVol, 3, 0, "Delta", bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    d5  = buy5  - sell5
+    d15 = buy15 - sell15
+    table.cell(tVol, 0, 1, f_tfLabel(tf3),  bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tVol, 1, 1, str.tostring(buy5,  format.volume),  bgcolor=cBgD, text_color=cGrn, text_size=size.small)
+    table.cell(tVol, 2, 1, str.tostring(sell5, format.volume),  bgcolor=cBgD, text_color=cRed, text_size=size.small)
+    table.cell(tVol, 3, 1, str.tostring(d5,    format.volume),  bgcolor=d5 >= 0 ? cGrn : cRed, text_color=cTxt, text_size=size.small)
+    table.cell(tVol, 0, 2, f_tfLabel(ltfTf), bgcolor=cHdr, text_color=cTxt, text_size=size.small)
+    table.cell(tVol, 1, 2, str.tostring(buy15,  format.volume), bgcolor=cBgD, text_color=cGrn, text_size=size.small)
+    table.cell(tVol, 2, 2, str.tostring(sell15, format.volume), bgcolor=cBgD, text_color=cRed, text_size=size.small)
+    table.cell(tVol, 3, 2, str.tostring(d15,    format.volume), bgcolor=d15 >= 0 ? cGrn : cRed, text_color=cTxt, text_size=size.small)
+
+// ============================== ALERTS =======================================
+alertcondition(be1, "M1 Buy Entry",  "M1: Buy entry (cross > EMA9)")
+alertcondition(bx1, "M1 Sell Entry", "M1: Sell entry (cross < EMA9)")
+alertcondition(be2, "M3 Buy Entry",  "M3: Buy entry (cross > EMA9)")
+alertcondition(bx2, "M3 Sell Entry", "M3: Sell entry (cross < EMA9)")
+alertcondition(be3, "M5 Buy Entry",  "M5: Buy entry (cross > EMA9)")
+alertcondition(bx3, "M5 Sell Entry", "M5: Sell entry (cross < EMA9)")
+alertcondition(boUp, "M15 Breakout Up",   "M15: Breakout up")
+alertcondition(boDn, "M15 Breakout Down", "M15: Breakout down")
