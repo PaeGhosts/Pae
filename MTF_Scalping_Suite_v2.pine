@@ -7,7 +7,8 @@
 //  อัปเดตจาก v1:
 //   • โหมดเข้า: เลือกได้ระหว่าง "EMA9 ตัด EMA(สัญญาณ)"  หรือ  "ราคา ตัด EMA9"
 //   • Order Block (M5 + M15): บังคับให้มี Liquidity Sweep ก่อน displacement ได้ (ตาม Edge Rotation)
-//   • Volume Profile (M5 + M15) วาดคู่กันทางขวา | หน่วยเป็น $ (volume × ราคา) เปิด/ปิดได้
+//   • Volume Profile (M5 + M15) วาดคู่กันทางขวา | หน่วย $ (volume × ราคา) | โหมด TOTAL หรือ DELTA (Buy-Sell)
+//   • Label "$xxxK / $x.xM" บนเส้น POC ทั้ง M5 และ M15
 //   • TP/SL อัตโนมัติ: SL ใต้/เหนือจุดสวีป-สวิง หรือ ATR | TP แบบ R:R หรือ POC/Value Area (M15)
 //   • ตารางจัด layout 4 มุม + ปรับขนาดตัวอักษรได้ (เหมาะกับมือถือ)
 //
@@ -54,6 +55,7 @@ grpVP   = "Volume Profile (M5 + M15 Fixed Range)"
 showVPM15 = input.bool(true,  "แสดง Volume Profile M15", group=grpVP)
 showVPM5  = input.bool(true,  "แสดง Volume Profile M5",  group=grpVP)
 vpDollar  = input.bool(true,  "หน่วย Volume เป็นดอลลาร์ ($)", tooltip="เปิด = ใช้ volume × ราคา (hl2) ให้หน่วยเป็น $ (ปริมาณเงิน) | ปิด = ใช้ปริมาณดิบ", group=grpVP)
+vpMode    = input.string("TOTAL", "โหมด Profile", options=["TOTAL", "DELTA"], tooltip="TOTAL = Volume Profile รวม | DELTA = Buy-Sell (close>open = Buy, close<open = Sell) — POC = ระดับที่มี net pressure สูงสุด", group=grpVP)
 vpBars  = input.int(80, "จำนวนแท่งที่ใช้คำนวณ (ต่อ TF)", minval=20, maxval=240, group=grpVP)
 vpRows  = input.int(24, "จำนวนแถว (Rows)", minval=8, maxval=50, group=grpVP)
 vpVA    = input.float(70, "Value Area %", minval=50, maxval=95, group=grpVP)
@@ -218,6 +220,13 @@ if m5cd
 
 f_px(p)  => na(p) ? "-" : str.tostring(p, format.mintick)
 
+// Format ปริมาณ → "$xxxK / $x.xM / $x.xxB" ตามขนาด (เปลี่ยน prefix ตาม vpDollar)
+f_fmtVol(x) =>
+    a = math.abs(x)
+    sign = x < 0 ? "-" : ""
+    body = a >= 1e9 ? str.tostring(a/1e9, "#.##") + "B" : a >= 1e6 ? str.tostring(a/1e6, "#.##") + "M" : a >= 1e3 ? str.tostring(a/1e3, "#.#") + "K" : str.tostring(a, "#.#")
+    (vpDollar ? "$" : "") + sign + body
+
 // ----------------------------------------------------------------------------
 //  วาด ORDER BLOCK (M15 + M5)
 // ----------------------------------------------------------------------------
@@ -286,28 +295,35 @@ if showFVG and fvgBear and fvgTime != lastFvgBearT
 //  VOLUME PROFILE (M15 Fixed Range) -> POC / VAH / VAL + histogram
 // ----------------------------------------------------------------------------
 isNewM15 = ta.change(time(tfLTF)) != 0
-[m15tp, m15vol, m15hi, m15lo] = request.security(syminfo.tickerid, tfLTF, [hl2, volume, high, low], lookahead=barmerge.lookahead_off)
+[m15tp, m15vol, m15hi, m15lo, m15op, m15cl] = request.security(syminfo.tickerid, tfLTF, [hl2, volume, high, low, open, close], lookahead=barmerge.lookahead_off)
 
 var float[] vpTP  = array.new_float()
 var float[] vpVol = array.new_float()
 var float[] vpHi  = array.new_float()
 var float[] vpLo  = array.new_float()
+var float[] vpOp  = array.new_float()
+var float[] vpCl  = array.new_float()
 
 if isNewM15 and not na(m15vol)
     array.push(vpTP, m15tp)
     array.push(vpVol, m15vol)
     array.push(vpHi, m15hi)
     array.push(vpLo, m15lo)
+    array.push(vpOp, m15op)
+    array.push(vpCl, m15cl)
     if array.size(vpTP) > vpBars
         array.shift(vpTP)
         array.shift(vpVol)
         array.shift(vpHi)
         array.shift(vpLo)
+        array.shift(vpOp)
+        array.shift(vpCl)
 
 var box[] vpBoxes = array.new_box()
 var line  pocLine = na
 var line  vahLine = na
 var line  valLine = na
+var label pocLbl  = na
 var float pocPrice = na
 var float vahPrice = na
 var float valPrice = na
@@ -326,22 +342,32 @@ if showVPM15 and isNewM15 and array.size(vpTP) >= 10
         for i = 0 to n - 1
             tp = array.get(vpTP, i)
             vRaw = array.get(vpVol, i)
-            v = vpDollar ? vRaw * tp : vRaw
+            o15 = array.get(vpOp, i)
+            c15 = array.get(vpCl, i)
+            base = vpDollar ? vRaw * tp : vRaw
+            v = vpMode == "DELTA" ? (c15 > o15 ? base : c15 < o15 ? -base : 0.0) : base
             idx = math.floor((tp - pLo) / rng * (vpRows - 1))
             idx := math.max(0, math.min(vpRows - 1, idx))
             array.set(binVol, idx, array.get(binVol, idx) + v)
-        totalV = array.sum(binVol)
-        maxV   = array.max(binVol)
-        pocIdx = array.indexof(binVol, maxV)
+        maxAbsV = 0.0
+        pocIdx = 0
+        for i = 0 to vpRows - 1
+            av = math.abs(array.get(binVol, i))
+            if av > maxAbsV
+                maxAbsV := av
+                pocIdx := i
+        totalAbsV = 0.0
+        for i = 0 to vpRows - 1
+            totalAbsV := totalAbsV + math.abs(array.get(binVol, i))
         binH   = rng / vpRows
         pocPrice := pLo + (pocIdx + 0.5) * binH
-        vaTarget = totalV * vpVA / 100.0
-        accV = array.get(binVol, pocIdx)
+        vaTarget = totalAbsV * vpVA / 100.0
+        accV = math.abs(array.get(binVol, pocIdx))
         loI = pocIdx
         hiI = pocIdx
         while accV < vaTarget and (loI > 0 or hiI < vpRows - 1)
-            volLo = loI > 0 ? array.get(binVol, loI - 1) : -1.0
-            volHi = hiI < vpRows - 1 ? array.get(binVol, hiI + 1) : -1.0
+            volLo = loI > 0 ? math.abs(array.get(binVol, loI - 1)) : -1.0
+            volHi = hiI < vpRows - 1 ? math.abs(array.get(binVol, hiI + 1)) : -1.0
             if volHi >= volLo
                 hiI := hiI + 1
                 accV := accV + math.max(volHi, 0)
@@ -352,50 +378,60 @@ if showVPM15 and isNewM15 and array.size(vpTP) >= 10
         vahPrice := pLo + (hiI + 1) * binH
         baseX = bar_index + vpOffset
         for i = 0 to vpRows - 1
-            v = array.get(binVol, i)
-            if v > 0
-                w = math.max(1, math.round(v / maxV * vpWidth))
+            binVal = array.get(binVol, i)
+            absVal = math.abs(binVal)
+            if absVal > 0
+                w = math.max(1, math.round(absVal / maxAbsV * vpWidth))
                 topP = pLo + (i + 1) * binH
                 botP = pLo + i * binH
-                col = i == pocIdx ? color.new(colPOC, 30) : (i >= loI and i <= hiI ? color.new(color.blue, 70) : colVP)
+                col = i == pocIdx ? color.new(colPOC, 30) : (vpMode == "DELTA" ? (binVal >= 0 ? color.new(color.green, 70) : color.new(color.red, 70)) : (i >= loI and i <= hiI ? color.new(color.blue, 70) : colVP))
                 bb = box.new(left=baseX, top=topP, right=baseX + w, bottom=botP, xloc=xloc.bar_index, border_width=0, bgcolor=col)
                 array.push(vpBoxes, bb)
         line.delete(pocLine)
         line.delete(vahLine)
         line.delete(valLine)
+        label.delete(pocLbl)
         leftX = bar_index - n
         rightX = bar_index + vpOffset + vpWidth
         pocLine := line.new(leftX, pocPrice, rightX, pocPrice, xloc=xloc.bar_index, color=colPOC, width=2)
         vahLine := line.new(leftX, vahPrice, rightX, vahPrice, xloc=xloc.bar_index, color=colVA, width=1, style=line.style_dashed)
         valLine := line.new(leftX, valPrice, rightX, valPrice, xloc=xloc.bar_index, color=colVA, width=1, style=line.style_dashed)
+        pocLbl  := label.new(rightX, pocPrice, "M15 POC " + f_fmtVol(array.get(binVol, pocIdx)), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(colPOC, 20), textcolor=color.white, size=tblSize)
 
 // ----------------------------------------------------------------------------
 //  VOLUME PROFILE (M5 Fixed Range) -> POC / VAH / VAL + histogram
 //  วาดต่อจาก M15 ทางขวา เพื่อไม่ทับกัน
 // ----------------------------------------------------------------------------
 isNewM5vp = ta.change(time(tfM5)) != 0
-[vp5tp, vp5vol, vp5hi, vp5lo] = request.security(syminfo.tickerid, tfM5, [hl2, volume, high, low], lookahead=barmerge.lookahead_off)
+[vp5tp, vp5vol, vp5hi, vp5lo, vp5op, vp5cl] = request.security(syminfo.tickerid, tfM5, [hl2, volume, high, low, open, close], lookahead=barmerge.lookahead_off)
 
 var float[] vpTP5  = array.new_float()
 var float[] vpVol5 = array.new_float()
 var float[] vpHi5  = array.new_float()
 var float[] vpLo5  = array.new_float()
+var float[] vpOp5  = array.new_float()
+var float[] vpCl5  = array.new_float()
 
 if isNewM5vp and not na(vp5vol)
     array.push(vpTP5, vp5tp)
     array.push(vpVol5, vp5vol)
     array.push(vpHi5, vp5hi)
     array.push(vpLo5, vp5lo)
+    array.push(vpOp5, vp5op)
+    array.push(vpCl5, vp5cl)
     if array.size(vpTP5) > vpBars
         array.shift(vpTP5)
         array.shift(vpVol5)
         array.shift(vpHi5)
         array.shift(vpLo5)
+        array.shift(vpOp5)
+        array.shift(vpCl5)
 
 var box[] vpBoxes5 = array.new_box()
 var line  pocLine5 = na
 var line  vahLine5 = na
 var line  valLine5 = na
+var label pocLbl5  = na
 var float pocPrice5 = na
 var float vahPrice5 = na
 var float valPrice5 = na
@@ -414,22 +450,32 @@ if showVPM5 and isNewM5vp and array.size(vpTP5) >= 10
         for i = 0 to n5 - 1
             tp5 = array.get(vpTP5, i)
             vRaw5 = array.get(vpVol5, i)
-            v5 = vpDollar ? vRaw5 * tp5 : vRaw5
+            o5 = array.get(vpOp5, i)
+            c5 = array.get(vpCl5, i)
+            base5 = vpDollar ? vRaw5 * tp5 : vRaw5
+            v5 = vpMode == "DELTA" ? (c5 > o5 ? base5 : c5 < o5 ? -base5 : 0.0) : base5
             idx5 = math.floor((tp5 - pLo5) / rng5 * (vpRows - 1))
             idx5 := math.max(0, math.min(vpRows - 1, idx5))
             array.set(binVol5, idx5, array.get(binVol5, idx5) + v5)
-        totalV5 = array.sum(binVol5)
-        maxV5   = array.max(binVol5)
-        pocIdx5 = array.indexof(binVol5, maxV5)
+        maxAbsV5 = 0.0
+        pocIdx5 = 0
+        for i = 0 to vpRows - 1
+            av5 = math.abs(array.get(binVol5, i))
+            if av5 > maxAbsV5
+                maxAbsV5 := av5
+                pocIdx5 := i
+        totalAbsV5 = 0.0
+        for i = 0 to vpRows - 1
+            totalAbsV5 := totalAbsV5 + math.abs(array.get(binVol5, i))
         binH5   = rng5 / vpRows
         pocPrice5 := pLo5 + (pocIdx5 + 0.5) * binH5
-        vaTarget5 = totalV5 * vpVA / 100.0
-        accV5 = array.get(binVol5, pocIdx5)
+        vaTarget5 = totalAbsV5 * vpVA / 100.0
+        accV5 = math.abs(array.get(binVol5, pocIdx5))
         loI5 = pocIdx5
         hiI5 = pocIdx5
         while accV5 < vaTarget5 and (loI5 > 0 or hiI5 < vpRows - 1)
-            volLo5 = loI5 > 0 ? array.get(binVol5, loI5 - 1) : -1.0
-            volHi5 = hiI5 < vpRows - 1 ? array.get(binVol5, hiI5 + 1) : -1.0
+            volLo5 = loI5 > 0 ? math.abs(array.get(binVol5, loI5 - 1)) : -1.0
+            volHi5 = hiI5 < vpRows - 1 ? math.abs(array.get(binVol5, hiI5 + 1)) : -1.0
             if volHi5 >= volLo5
                 hiI5 := hiI5 + 1
                 accV5 := accV5 + math.max(volHi5, 0)
@@ -440,22 +486,25 @@ if showVPM5 and isNewM5vp and array.size(vpTP5) >= 10
         vahPrice5 := pLo5 + (hiI5 + 1) * binH5
         baseX5 = bar_index + vpOffset + vpWidth + 4
         for i = 0 to vpRows - 1
-            v = array.get(binVol5, i)
-            if v > 0
-                w = math.max(1, math.round(v / maxV5 * vpWidth))
+            binVal5 = array.get(binVol5, i)
+            absVal5 = math.abs(binVal5)
+            if absVal5 > 0
+                w = math.max(1, math.round(absVal5 / maxAbsV5 * vpWidth))
                 topP = pLo5 + (i + 1) * binH5
                 botP = pLo5 + i * binH5
-                col = i == pocIdx5 ? color.new(colPOCM5, 30) : (i >= loI5 and i <= hiI5 ? color.new(color.fuchsia, 70) : colVPM5)
+                col = i == pocIdx5 ? color.new(colPOCM5, 30) : (vpMode == "DELTA" ? (binVal5 >= 0 ? color.new(color.green, 70) : color.new(color.red, 70)) : (i >= loI5 and i <= hiI5 ? color.new(color.fuchsia, 70) : colVPM5))
                 bb = box.new(left=baseX5, top=topP, right=baseX5 + w, bottom=botP, xloc=xloc.bar_index, border_width=0, bgcolor=col)
                 array.push(vpBoxes5, bb)
         line.delete(pocLine5)
         line.delete(vahLine5)
         line.delete(valLine5)
+        label.delete(pocLbl5)
         leftX5 = bar_index - n5
         rightX5 = bar_index + vpOffset + 2 * vpWidth + 4
         pocLine5 := line.new(leftX5, pocPrice5, rightX5, pocPrice5, xloc=xloc.bar_index, color=colPOCM5, width=2, style=line.style_dotted)
         vahLine5 := line.new(leftX5, vahPrice5, rightX5, vahPrice5, xloc=xloc.bar_index, color=colVAM5,  width=1, style=line.style_dotted)
         valLine5 := line.new(leftX5, valPrice5, rightX5, valPrice5, xloc=xloc.bar_index, color=colVAM5,  width=1, style=line.style_dotted)
+        pocLbl5  := label.new(rightX5, pocPrice5, "M5 POC " + f_fmtVol(array.get(binVol5, pocIdx5)), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(colPOCM5, 20), textcolor=color.white, size=tblSize)
 
 // ----------------------------------------------------------------------------
 //  TP / SL อัตโนมัติ (คำนวณหลัง VP เพื่อใช้ค่า POC/VA ได้)
